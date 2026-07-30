@@ -1,12 +1,13 @@
 /**
  * server.js
  * ----------------------------------------------------------------------------
- * Proxy between your frontend and Ollama.
+ * Proxy for your chatbot — now uses Groq Cloud API (free tier).
+ * No more localhost issues on Render.
  * 
- * - Validates requests
- * - Logs activity
- * - Adds CORS
- * - Forwards to Ollama (local or remote)
+ * Setup:
+ *   1. Get a free API key at https://console.groq.com
+ *   2. Add GROQ_API_KEY to Render's environment variables
+ *   3. Deploy
  * ----------------------------------------------------------------------------
  */
 
@@ -18,7 +19,8 @@ const app = express();
 
 // ---------- Configuration ----------
 const PORT = process.env.PORT || 3000;
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 
 // ---------- Middleware ----------
 app.use(cors());
@@ -56,9 +58,35 @@ function validateChatRequest(body) {
   return null;
 }
 
-// ---------- Routes ----------
+// ---------- Helper: call Groq ----------
+async function callGroq(payload, stream = false) {
+  if (!GROQ_API_KEY) {
+    throw new Error('GROQ_API_KEY environment variable is not set.');
+  }
 
-// Non‑streaming chat
+  const response = await fetch(GROQ_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${GROQ_API_KEY}`
+    },
+    body: JSON.stringify({
+      model: 'llama3-8b-8192',   // fast, free, good quality
+      ...payload,
+      stream
+    })
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({}));
+    const message = errorData.error?.message || `HTTP ${response.status}`;
+    throw new Error(message);
+  }
+
+  return response;
+}
+
+// ---------- Non‑streaming chat ----------
 app.post('/api/chat', async (req, res) => {
   const validationError = validateChatRequest(req.body);
   if (validationError) {
@@ -66,23 +94,18 @@ app.post('/api/chat', async (req, res) => {
   }
 
   try {
-    const upstream = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...req.body, stream: false })
-    });
+    const upstream = await callGroq(req.body, false);
     const data = await upstream.json();
-    if (!upstream.ok) return res.status(upstream.status).json(data);
     res.json(data);
   } catch (err) {
-    console.error('Proxy error (non-streaming):', err.message);
+    console.error('Error (non-streaming):', err.message);
     res.status(502).json({
-      error: { message: 'Could not reach Ollama at ' + OLLAMA_URL + '. Is "ollama serve" running?' }
+      error: { message: err.message || 'Groq API request failed.' }
     });
   }
 });
 
-// Streaming chat (SSE)
+// ---------- Streaming chat (SSE) ----------
 app.post('/api/chat/stream', async (req, res) => {
   const validationError = validateChatRequest(req.body);
   if (validationError) {
@@ -90,40 +113,43 @@ app.post('/api/chat/stream', async (req, res) => {
   }
 
   try {
-    const upstream = await fetch(`${OLLAMA_URL}/v1/chat/completions`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ...req.body, stream: true })
-    });
+    const upstream = await callGroq(req.body, true);
 
-    if (!upstream.ok || !upstream.body) {
-      const data = await upstream.json().catch(() => ({}));
-      return res.status(upstream.status || 502).json(data);
+    if (!upstream.body) {
+      throw new Error('No response body from Groq.');
     }
 
+    // Forward SSE headers
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
     res.setHeader('Connection', 'keep-alive');
 
+    // Pipe the stream directly to the client
     upstream.body.on('data', chunk => res.write(chunk));
     upstream.body.on('end', () => res.end());
     upstream.body.on('error', () => res.end());
   } catch (err) {
-    console.error('Proxy error (streaming):', err.message);
+    console.error('Error (streaming):', err.message);
     res.status(502).json({
-      error: { message: 'Could not reach Ollama at ' + OLLAMA_URL + '. Is "ollama serve" running?' }
+      error: { message: err.message || 'Groq API stream request failed.' }
     });
   }
 });
 
-// Health check
+// ---------- Health check ----------
 app.get('/', (req, res) => {
-  res.send('✅ Proxy is running. POST to /api/chat or /api/chat/stream.');
+  if (!GROQ_API_KEY) {
+    res.status(500).send('⚠️ GROQ_API_KEY is missing. Set it in Render environment variables.');
+  } else {
+    res.send('✅ Proxy is running with Groq. POST to /api/chat or /api/chat/stream.');
+  }
 });
 
 // ---------- Start server ----------
 app.listen(PORT, () => {
   console.log(`✅ Proxy listening on http://localhost:${PORT}`);
-  console.log(`   Forwarding to Ollama at ${OLLAMA_URL}`);
-  console.log('   Make sure "ollama serve" is running (or set OLLAMA_URL environment variable).');
+  console.log(`   Using Groq API (model: llama3-8b-8192)`);
+  if (!GROQ_API_KEY) {
+    console.warn('⚠️  GROQ_API_KEY is not set! Add it to your environment variables.');
+  }
 });

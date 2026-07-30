@@ -1,23 +1,12 @@
 /**
  * server.js
  * ----------------------------------------------------------------------------
- * Optional local proxy between index.html and Ollama.
- *
- * Why use it if everything is already local?
- *   - Adds request validation (rejects malformed/oversized payloads)
- *   - Adds simple logging so you can see what's being asked/answered
- *   - Adds CORS headers, useful if you ever serve index.html from a different
- *     port/origin instead of opening it as a file
- *   - Gives you one place to add rate limiting, auth, or logging to a file
- *     later, without touching the frontend
- *
- * It is NOT required — index.html can talk to Ollama directly on
- * http://localhost:11434. Use whichever you prefer in the Settings panel.
- *
- * Setup:
- *   npm install express cors node-fetch@2
- *   node server.js
- *   -> listens on http://localhost:3000, forwards to http://localhost:11434
+ * Proxy between your frontend and Ollama.
+ * 
+ * - Validates requests
+ * - Logs activity
+ * - Adds CORS
+ * - Forwards to Ollama (local or remote)
  * ----------------------------------------------------------------------------
  */
 
@@ -26,14 +15,16 @@ const cors = require('cors');
 const fetch = require('node-fetch');
 
 const app = express();
-const port = process.env.PORT || 3000;
-app.listen(port, () => {
-  console.log(`Server running on port ${port}`);
-});
+
+// ---------- Configuration ----------
+const PORT = process.env.PORT || 3000;
+const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
+
+// ---------- Middleware ----------
 app.use(cors());
 app.use(express.json({ limit: '2mb' }));
 
-// ---- simple request logging ----
+// Request logger
 app.use((req, res, next) => {
   const start = Date.now();
   res.on('finish', () => {
@@ -42,7 +33,7 @@ app.use((req, res, next) => {
   next();
 });
 
-// ---- basic input validation ----
+// ---------- Validation ----------
 function validateChatRequest(body) {
   if (!body || typeof body !== 'object') return 'Request body must be JSON.';
   if (!Array.isArray(body.messages) || body.messages.length === 0) {
@@ -65,7 +56,9 @@ function validateChatRequest(body) {
   return null;
 }
 
-// ---- non-streaming chat endpoint ----
+// ---------- Routes ----------
+
+// Non‑streaming chat
 app.post('/api/chat', async (req, res) => {
   const validationError = validateChatRequest(req.body);
   if (validationError) {
@@ -89,7 +82,7 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// ---- streaming chat endpoint (forwards Ollama's SSE stream as-is) ----
+// Streaming chat (SSE)
 app.post('/api/chat/stream', async (req, res) => {
   const validationError = validateChatRequest(req.body);
   if (validationError) {
@@ -123,12 +116,14 @@ app.post('/api/chat/stream', async (req, res) => {
   }
 });
 
+// Health check
 app.get('/', (req, res) => {
-  res.send('Local chatbot proxy is running. POST to /api/chat or /api/chat/stream.');
+  res.send('✅ Proxy is running. POST to /api/chat or /api/chat/stream.');
 });
 
+// ---------- Start server ----------
 app.listen(PORT, () => {
   console.log(`✅ Proxy listening on http://localhost:${PORT}`);
   console.log(`   Forwarding to Ollama at ${OLLAMA_URL}`);
-  console.log('   Make sure "ollama serve" is running (setup.ps1 / start-chatbot.ps1 handle this).');
+  console.log('   Make sure "ollama serve" is running (or set OLLAMA_URL environment variable).');
 });
